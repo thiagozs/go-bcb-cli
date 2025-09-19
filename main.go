@@ -21,56 +21,11 @@ type CotacaoResponse struct {
 	} `json:"value"`
 }
 
-func GetUSDRateByDate(date time.Time) (float64, error) {
-	// API usa formato MM-DD-YYYY (padronizado)
-	url := fmt.Sprintf("https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/"+
-		"CotacaoDolarDia(dataCotacao=@dataCotacao)?@dataCotacao='%s'&$format=json",
-		date.Format("01-02-2006"))
-
-	// log URL para facilitar debug
-	fmt.Printf("Consultando URL: %s\n", url)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	// Se o serviço do BCB retornar 5xx (por exemplo quando a cotação do dia ainda não
-	// foi publicada) vamos propagar o erro para o chamador tratar. Chamadores podem
-	// optar por tentar um fallback de data. Aqui consideramos 200 como sucesso.
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("status %d", resp.StatusCode)
-	}
-
-	var data CotacaoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return 0, err
-	}
-
-	if len(data.Value) == 0 {
-		return 0, fmt.Errorf("nenhuma cotação encontrada para %s", date.Format("02-01-2006"))
-	}
-
-	// exemplo: usando a cotação venda
-	return data.Value[0].CotacaoVenda, nil
-}
-
-// GetUSDRate tenta obter a cotação para a data fornecida. Se o serviço do BCB
-// devolver um 5xx (por exemplo quando a cotação do dia ainda não foi publicada),
-// a função tentará automaticamente datas anteriores até maxBackDays.
-// versão legada que retorna somente venda para compatibilidade
-func GetUSDRate(date time.Time, maxBackDays int) (float64, time.Time, error) {
-	compra, venda, dt, err := GetUSDRateWithConfigAndCurrency(date, maxBackDays, 10, 3, "USD")
-	_ = compra
-	return venda, dt, err
-}
-
 // apiBaseURL pode ser sobrescrito em testes
 var apiBaseURL = "https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/"
 
 // buildBCBURL constrói a URL correta para o BCB dependendo da moeda.
-// Para USD usa CotacaoDolarPeriodo com formato dd-MM-YYYY (02-01-2006).
+// Para USD usa CotacaoDolarPeriodo com formato MM-DD-YYYY (01-02-2006).
 // Para outras moedas usa CotacaoMoedaAberturaOuIntermediario com formato MM-DD-YYYY (01-02-2006)
 func buildBCBURL(baseURL, currency string, tryDate time.Time) string {
 	if strings.ToUpper(currency) == "USD" {
@@ -83,19 +38,9 @@ func buildBCBURL(baseURL, currency string, tryDate time.Time) string {
 		strings.ToUpper(currency), tryDate.Format("01-02-2006"))
 }
 
-// GetUSDRateWithConfig tenta obter a cotação para a data fornecida. Se o serviço do BCB
-// devolver um 5xx (por exemplo quando a cotação do dia ainda não foi publicada),
-// a função tentará automaticamente datas anteriores até maxBackDays.
+// GetUSDRateWithConfigAndCurrency tenta obter a cotação para a data fornecida.
+// Se o serviço do BCB devolver um 5xx a função tentará datas anteriores até maxBackDays.
 // timeoutSeconds e maxRetries controlam o cliente e tentativas para cada data.
-func GetUSDRateWithConfig(date time.Time, maxBackDays int, timeoutSeconds int, maxRetries int) (float64, time.Time, error) {
-	compra, venda, dt, err := GetUSDRateWithConfigAndCurrency(date, maxBackDays, timeoutSeconds, maxRetries, "USD")
-	_ = compra
-	return venda, dt, err
-}
-
-// GetUSDRateWithConfigAndCurrency faz o mesmo que GetUSDRateWithConfig, mas permite
-// especificar a moeda. Para USD usa CotacaoDolarPeriodo; para outras moedas usa
-// CotacaoMoedaAberturaOuIntermediario.
 func GetUSDRateWithConfigAndCurrency(date time.Time, maxBackDays int, timeoutSeconds int, maxRetries int, currency string) (float64, float64, time.Time, error) {
 	client := &http.Client{Timeout: time.Duration(timeoutSeconds) * time.Second}
 
@@ -104,9 +49,7 @@ func GetUSDRateWithConfigAndCurrency(date time.Time, maxBackDays int, timeoutSec
 
 	for i := 0; i <= maxBackDays; i++ {
 		tryDate := date.AddDate(0, 0, -i)
-		// construir URL via helper para facilitar testes
-		var url string
-		url = buildBCBURL(baseURL, strings.ToUpper(currency), tryDate)
+		url := buildBCBURL(baseURL, strings.ToUpper(currency), tryDate)
 		fmt.Printf("Consultando URL: %s\n", url)
 
 		var resp *http.Response
@@ -121,8 +64,8 @@ func GetUSDRateWithConfigAndCurrency(date time.Time, maxBackDays int, timeoutSec
 				break
 			}
 
+			// handle 5xx with retries (per-date)
 			if resp.StatusCode >= 500 && attempt < maxRetries {
-				// ler um snippet do corpo para debugar o 5xx
 				bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 				resp.Body.Close()
 				snippet := strings.TrimSpace(string(bodySnippet))
@@ -136,7 +79,6 @@ func GetUSDRateWithConfigAndCurrency(date time.Time, maxBackDays int, timeoutSec
 			}
 
 			if resp.StatusCode >= 500 {
-				// ler e logar o corpo antes de tentar dia anterior
 				bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 				resp.Body.Close()
 				snippet := strings.TrimSpace(string(bodySnippet))
@@ -146,6 +88,7 @@ func GetUSDRateWithConfigAndCurrency(date time.Time, maxBackDays int, timeoutSec
 				fmt.Printf("BCB retornou %d para %s — tentando dia anterior; body=%q\n", resp.StatusCode, tryDate.Format("01-02-2006"), snippet)
 				break
 			}
+
 			return 0, 0, time.Time{}, fmt.Errorf("status %d", resp.StatusCode)
 		}
 
@@ -153,10 +96,7 @@ func GetUSDRateWithConfigAndCurrency(date time.Time, maxBackDays int, timeoutSec
 			return 0, 0, time.Time{}, fmt.Errorf("sem resposta do servidor")
 		}
 
-		// Se o servidor retornou 5xx e decidimos tentar o dia anterior, não
-		// devemos tentar parsear o corpo (que frequentemente não é JSON).
 		if resp.StatusCode >= 500 {
-			// fechar body e tentar próxima data
 			resp.Body.Close()
 			continue
 		}
@@ -177,12 +117,9 @@ func GetUSDRateWithConfigAndCurrency(date time.Time, maxBackDays int, timeoutSec
 			return 0, 0, time.Time{}, fmt.Errorf("esperado json, recebido Content-Type=%s, corpo=%q", ct, snippet)
 		}
 
-		// Alguns endpoints ocasionalmente retornam JSON envolvido em comentários,
-		// por exemplo: /*{ ... }*/. Removemos esse wrapper antes de tentar o
-		// Unmarshal para evitar erros de parse.
+		// remove possible /* ... */ wrapper
 		cleaned := strings.TrimSpace(string(bodyBytes))
 		if strings.HasPrefix(cleaned, "/*") && strings.HasSuffix(cleaned, "*/") {
-			// remover os possíveis comentários de abertura/fechamento
 			cleaned = strings.TrimPrefix(cleaned, "/*")
 			cleaned = strings.TrimSuffix(cleaned, "*/")
 			cleaned = strings.TrimSpace(cleaned)
@@ -249,11 +186,16 @@ func main() {
 	var price string
 	flag.StringVar(&price, "price", "venda", "qual preço retornar: compra|venda|both")
 
+	// consultar N dias atrás explicitamente (ex: -daysago=3)
+	var daysAgo int
+	flag.IntVar(&daysAgo, "daysago", 0, "consultar a cotação de N dias atrás (0 = hoje)")
+
 	// parse após definir todas as flags
 	flag.Parse()
 
-	// tenta a cotação de hoje com as configurações fornecidas
-	compra, venda, usedDate, err := GetUSDRateWithConfigAndCurrency(time.Now(), maxBackDays, timeoutSeconds, maxRetries, currency)
+	// determina a data base (hoje ou N dias atrás) e tenta a cotação com as configurações fornecidas
+	baseDate := time.Now().AddDate(0, 0, -daysAgo)
+	compra, venda, usedDate, err := GetUSDRateWithConfigAndCurrency(baseDate, maxBackDays, timeoutSeconds, maxRetries, currency)
 	if err != nil {
 		fmt.Printf("erro ao consultar o endpoint: %v\n", err)
 		return

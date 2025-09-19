@@ -76,7 +76,7 @@ go test ./...
 
 Notas
 
-- O formato de data usado nas URLs é `dd-MM-yyyy` (ex: `18-09-2025`) para compatibilidade com exemplos do serviço.
+- O formato de data usado nas URLs é `MM-DD-YYYY` (ex: `09-18-2025`) para compatibilidade com exemplos do serviço.
 
 - Em caso de erro 500 o serviço do BCB pode retornar um corpo não-JSON; o POC registra um snippet desse corpo para ajudar no diagnóstico.
 
